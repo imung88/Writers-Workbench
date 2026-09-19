@@ -18,6 +18,8 @@ A map maker that generates a dynamic description
 
 Character relationship graph 
 
+Optional Feature: MCP to connect the builder with your AI agents, see MCP folder. Optional to setup.
+
 # Current templates available:
 
 Main characters: full cards with contradiction, descriptions, likes/fears, NSFW sections, non-human mode
@@ -67,3 +69,18 @@ Concepts: magic systems, laws, customs, species, anything else
 - Recovery of the previous autosaved workspace into a project.
 
 - Removed external font requests; import processing stays local without AI.
+
+# Changelog (September 18th, 2026)
+
+**Paper theme**
+
+- Added a light "paper" theme alongside the existing dark one — an easy-on-the-eyes look for long writing sessions.
+- Toggle it with the **Paper** button in the top-right corner of the header. Click again to switch back to dark.
+- Your choice is remembered, so the app opens in whichever theme you last used.
+
+**MCP bridge (optional, for advanced users)**
+
+- Added an optional plugin in the `mcp/` folder that lets an AI assistant read and edit your projects while you have the app open — so you can ask an AI to add a character, fill in fields, or build a lorebook for you.
+- The AI writes real changes into the live app, and the form updates in front of you. A small status pill in the header shows whether the bridge is connected.
+- **Entirely optional.** Writer's Workbench still works exactly as before without it, and nothing in that folder runs unless you deliberately start it. The HTML file stays offline and single.
+- See `mcp/MCP_README.md` for setup.

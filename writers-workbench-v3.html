@@ -384,6 +384,9 @@ pre#out .h{color:var(--accent)}
 
 <header>
   <div class="brand">Writer's Workbench <span>/ SillyTavern</span></div>
+  <div class="ai-status" id="aiStatus" hidden role="status" aria-live="polite" title="AI bridge">
+    <span class="ai-dot" aria-hidden="true"></span><span class="ai-label">AI</span>
+  </div>
   <button class="btn theme-toggle" id="themeToggle" type="button" aria-pressed="false" title="Switch to paper (light) theme"><span class="t-icon" aria-hidden="true">◐</span> <span class="t-label">Paper</span></button>
   <div class="projectbar" aria-label="Project controls">
     <span class="project-label">Project</span>
@@ -1764,6 +1767,79 @@ const LIST_KEYS = {
   history: ["who"],
   concept: ["limits","misconceptions"]
 };
+
+/* Field keys the app writes itself (map/parent bookkeeping). An AI should not
+   set these; they are surfaced by describeTemplate so they aren't mistaken for
+   user-editable fields when echoed back. */
+const MANAGED_FIELDS = ["isGroup","parentId","parentResolved","partOf","clusterCollapsed","mapData"];
+/* Of those, ones that always exist on the kind's entry regardless of content. */
+const MANAGED_FIELDS_ALWAYS = { isGroup:false, parentId:false, parentResolved:false, partOf:false, clusterCollapsed:true, mapData:false };
+
+/* Describe a template by reading the live form DOM, so the description can
+   never drift from the fields the UI actually renders. Used by the MCP
+   bridge so an AI knows the real field/list keys instead of guessing. */
+function describeTemplate(kind){
+  let paneEl = document.getElementById("form-"+kind);
+  // location's form lives in the location pane; guard anything odd.
+  if(!paneEl) return { kind:kind, error:"Unknown template: "+kind };
+
+  const listConfig = {};
+  LIST_KEYS[kind].forEach(k=>{ listConfig[k] = LISTS[k] || {}; });
+
+  // Walk the pane in document order, tracking the enclosing <details> section.
+  const fields = [];
+  const lists = {};
+  let section = "";
+  const nodes = paneEl.querySelectorAll("details.sec, [data-k], [data-list]");
+  Array.from(nodes).forEach(el=>{
+    if(el.tagName === "DETAILS"){
+      const s = el.querySelector("summary");
+      if(s) section = s.childNodes[0] && s.childNodes[0].nodeType === 3
+        ? s.childNodes[0].textContent.trim()
+        : s.textContent.trim();
+      return;
+    }
+    if(el.dataset.k){
+      const label = el.closest(".field")?.querySelector("label");
+      fields.push({
+        key: el.dataset.k,
+        section: section || null,
+        type: el.dataset.bool ? "boolean" : (el.tagName === "TEXTAREA" ? "text" : "line"),
+        label: label ? label.textContent.trim() : null,
+        hint: el.getAttribute("placeholder") || null
+      });
+      return;
+    }
+    if(el.dataset.list){
+      const key = el.dataset.list;
+      if(lists[key]) return; // already seen (renderList rebuilds the wrapper)
+      const cfg = LISTS[key] || {};
+      lists[key] = {
+        key: key,
+        section: section || null,
+        multiline: !!cfg.multiline,
+        example: cfg.ph || null,
+        bullets: cfg.bullet || ""
+      };
+    }
+  });
+
+  const tab = document.getElementById("tab-"+kind);
+  // Fields the app owns internally (map/parent bookkeeping). They legitimately
+  // exist on an entry but are not user-editable, so they are reported apart
+  // from `fields` rather than being mistaken for settable keys.
+  const active = (S[kind] && S[kind].list[S[kind].active]) || null;
+  const managed = MANAGED_FIELDS.filter(k=> (active && k in (active.fields||{})) || MANAGED_FIELDS_ALWAYS[k]);
+  return {
+    kind: kind,
+    name: tab ? tab.textContent.trim() : kind,
+    fields: fields,
+    managedFields: managed,
+    lists: Object.keys(listConfig).map(k=> lists[k] || {
+      key:k, multiline:!!listConfig[k].multiline, example:listConfig[k].ph||null, bullets:listConfig[k].bullet||""
+    })
+  };
+}
 
 function wwId(prefix){
   if(window.crypto && typeof window.crypto.randomUUID === "function") return prefix+"_"+window.crypto.randomUUID();
@@ -4839,6 +4915,30 @@ wireEntrySearch();
 wireLoreSettings();
 wireLocalCardImport();
 initProjectSystem().finally(()=>{ nameInput.focus(); });
+
+/* ---- Optional integration surface for the local MCP bridge ----
+   Everything above lives inside this IIFE, so nothing is reachable from
+   outside unless we say so. This exposes the smallest set of the app's own
+   functions the bridge needs. If no bridge script is present, this is inert. */
+window.wwApp = {
+  snapshot: function(){ return snapshot(); },
+  coerce: function(d, kind){ return coerce(d, kind); },
+  cardMd: function(st, kind, hide){ return cardMd(st, kind, hide); },
+  lorebookEntry: function(uid, st, hide, kind){ return lorebookEntry(uid, st, hide, kind); },
+  masterCollect: function(hide){ return masterCollect(hide); },
+  estTokens: function(s){ return estTokens(s); },
+  wwId: function(prefix){ return wwId(prefix); },
+  toast: function(msg){ return toast(msg); },
+  setMode: function(next){ return setMode(next); },
+  render: function(){ return render(); },
+  hydrate: function(){ return hydrate(); },
+  describeTemplate: function(kind){ return describeTemplate(kind); },
+  autosave: function(){ return autosave(); },
+  renderRelationshipUI: function(){ return renderRelationshipUI(); },
+  getMode: function(){ return mode; },
+  roster: function(kind){ return S[kind]; },
+  relationships: function(){ return RELATIONSHIPS; }
+};
 })();
 </script>
 
@@ -4945,6 +5045,41 @@ html[data-theme="paper"] .theme-toggle .t-icon{transform:rotate(180deg)}
   letter-spacing:.02em;
   color:var(--ink-faint);
 }
+
+/* AI bridge status pill — only shown once the bridge script reports in */
+.ai-status{
+  display:inline-flex;
+  align-items:center;
+  gap:6px;
+  margin-left:-2px;
+  padding:3px 9px 3px 7px;
+  border:1px solid var(--line);
+  border-radius:999px;
+  background:var(--panel-2);
+  font-family:var(--sans);
+  font-size:10px;
+  font-weight:600;
+  letter-spacing:.06em;
+  text-transform:uppercase;
+  color:var(--ink-faint);
+  white-space:nowrap;
+  transition:color .2s,border-color .2s;
+}
+.ai-status[hidden]{display:none}
+.ai-dot{
+  width:7px;
+  height:7px;
+  flex:none;
+  border-radius:50%;
+  background:var(--ink-faint);
+  box-shadow:0 0 0 0 transparent;
+  transition:background .2s,box-shadow .2s;
+}
+.ai-status.is-on{color:var(--name);border-color:rgba(223,168,104,.42)}
+.ai-status.is-on .ai-dot{background:#6fbf73;box-shadow:0 0 0 3px rgba(111,191,115,.16)}
+.ai-status.is-idle .ai-dot{background:#d9a94a;box-shadow:0 0 0 3px rgba(217,169,74,.14)}
+.ai-status.is-off .ai-dot{background:var(--ink-faint)}
+.ai-status.is-off{opacity:.6}
 
 .namebar{
   min-width:220px;
@@ -6606,6 +6741,376 @@ html[data-theme="paper"] .cluster-dialog{background:rgba(31,122,110,.06)}
 })();
 </script>
 <!-- ================= END VISUAL UPGRADE ================= -->
+
+<!-- ================= MCP BRIDGE (optional AI control) =================
+     Talks to a local "writers-workbench-mcp" server if one is running on
+     127.0.0.1:8765. If it is not running, every call fails silently and the
+     app behaves exactly as before. Nothing here is required for normal use. -->
+<script>
+(function(){
+  "use strict";
+  var BRIDGE_URL = "http://127.0.0.1:8765";
+  var POLL_MS = 1200;
+  var IDLE_MS = 5000;       // slow polling while no server is present
+  var FAIL_MS = 15000;      // back off hard once we've decided there's no server
+
+  if(location.protocol !== "file:" && location.protocol !== "http:" && location.protocol !== "https:") return;
+
+  // --- which lorebook-name input belongs to which kind (must match LORE_IDS) ---
+  var LORE_INPUT = {
+    main:"lorebookNameMain", side:"lorebookName", scenario:"lorebookName",
+    location:"lorebookNameLoc", item:"lorebookNameItem", faction:"lorebookNameFac",
+    history:"lorebookNameHist", concept:"lorebookNameCon"
+  };
+  var KINDS = ["main","side","scenario","location","item","faction","history","concept"];
+
+  var failCount = 0;
+  var pollTimer = null;
+  var wasConnected = null; // null = unknown yet, true/false = last known link state
+
+  // The app exposes its internals on window.wwApp (everything else lives inside
+  // the app's own IIFE and is not reachable here). Bail out cleanly if absent.
+  var A = window.wwApp;
+  if(!A){ return; }
+
+  // Header status pill: grey = no plugin reachable, amber = reconnecting,
+  // green = connected and mirroring state.
+  var statusEl = document.getElementById("aiStatus");
+  function setStatus(state){
+    if(!statusEl) return;
+    statusEl.hidden = false;
+    statusEl.classList.toggle("is-on", state === "on");
+    statusEl.classList.toggle("is-idle", state === "idle");
+    statusEl.classList.toggle("is-off", state === "off");
+    statusEl.title = state === "on"
+      ? "AI bridge connected — the app is mirroring state to the plugin."
+      : state === "idle"
+        ? "AI bridge reconnecting…"
+        : "AI bridge: no plugin server found on 127.0.0.1:8765.";
+  }
+  setStatus("off");
+
+  function loreName(kind){
+    var el = document.getElementById(LORE_INPUT[kind]);
+    return el ? el.value : "";
+  }
+
+  // Build a valid entry from plain data using the app's own coercion rules.
+  function buildEntry(kind, data){
+    data = data || {};
+    var draft = {
+      name: typeof data.name === "string" ? data.name : "",
+      fields: data.fields && typeof data.fields === "object" ? data.fields : {},
+      lists: {}
+    };
+    var lists = data.lists && typeof data.lists === "object" ? data.lists : {};
+    var entry = A.coerce(draft, kind);
+    if(entry && typeof entry === "object" && entry.lists){
+      Object.keys(lists).forEach(function(k){
+        if(Array.isArray(lists[k]) && entry.lists.hasOwnProperty(k)){
+          entry.lists[k] = lists[k].slice();
+        }
+      });
+      if(data.fields && typeof data.fields === "object"){
+        Object.keys(data.fields).forEach(function(k){ entry.fields[k] = data.fields[k]; });
+      }
+    }
+    return entry;
+  }
+
+  function locate(kind, ref){
+    var R = A.roster(kind);
+    if(!R) return -1;
+    if(typeof ref.index === "number" && ref.index >= 0 && ref.index < R.list.length) return ref.index;
+    if(ref.id){
+      for(var i=0;i<R.list.length;i++){ if(R.list[i] && R.list[i].id === ref.id) return i; }
+    }
+    if(ref.name){
+      var lower = String(ref.name).toLowerCase();
+      for(var j=0;j<R.list.length;j++){
+        if(R.list[j] && String(R.list[j].name||"").toLowerCase() === lower) return j;
+      }
+    }
+    return -1;
+  }
+
+  function repaint(kind){
+    // show the touched roster so the user sees the change land
+    if(KINDS.indexOf(kind) >= 0 && A.getMode() !== kind) A.setMode(kind);
+    // hydrate() re-reads state into the open entry form AND re-renders the
+    // roster/preview (it ends with render() + autosave()). Calling render()
+    // alone left the form inputs stale until a manual page refresh.
+    try{ A.hydrate(); }
+    catch(_){
+      try{ A.render(); A.autosave(); }
+      catch(__){ try{ A.setMode(A.getMode()); }catch(___ ){} }
+    }
+  }
+
+  // Split requested keys into those the template defines and those it doesn't,
+  // so the AI learns its key was wrong instead of silently succeeding.
+  // A key is judged against the TEMPLATE ONLY — never against the entry's own
+  // contents, or a key that leaked in from an older version would report as
+  // applied forever and could never be flagged.
+  function classify(kind, requested, entry){
+    var tpl = A.describeTemplate(kind);
+    var validFields = {}, validLists = {};
+    ((tpl && tpl.fields) || []).forEach(function(f){ validFields[f.key] = true; });
+    ((tpl && tpl.lists) || []).forEach(function(l){ validLists[l.key] = true; });
+    var applied = [], ignored = [], managed = [];
+    var rf = requested.fields || {}, rl = requested.lists || {};
+    Object.keys(rf).forEach(function(k){
+      if(validFields[k]){ applied.push("fields."+k); return; }
+      // App-owned bookkeeping: it does land, but it isn't a user field.
+      if((tpl && tpl.managedFields || []).indexOf(k) >= 0){ managed.push("fields."+k); return; }
+      ignored.push("fields."+k);
+    });
+    Object.keys(rl).forEach(function(k){
+      if(validLists[k]) applied.push("lists."+k);
+      else ignored.push("lists."+k);
+    });
+    return { applied:applied, ignored:ignored, managed:managed };
+  }
+
+  // --- command handlers -------------------------------------------------
+  var handlers = {
+    request_state: function(){
+      return { ok:true, state: A.snapshot() };
+    },
+
+    describe_template: function(cmd){
+      return { ok:true, template: A.describeTemplate(cmd.kind) };
+    },
+
+    add_entry: function(cmd){
+      var kind = cmd.kind;
+      var R = A.roster(kind);
+      if(!R) return { ok:false, error:"Unknown kind: "+kind };
+      var requested = cmd.entry || {};
+      var rep = classify(kind, requested, null);
+      // Drop keys the template doesn't define before building the entry, so a
+      // typo can't be persisted into a brand-new entry.
+      var clean = { name: requested.name, fields:{}, lists:{} };
+      Object.keys(requested.fields || {}).forEach(function(k){
+        if(rep.applied.indexOf("fields."+k) >= 0) clean.fields[k] = requested.fields[k];
+      });
+      Object.keys(requested.lists || {}).forEach(function(k){
+        if(rep.applied.indexOf("lists."+k) >= 0) clean.lists[k] = requested.lists[k];
+      });
+      var entry = buildEntry(kind, clean);
+      R.list.push(entry);
+      if(cmd.makeActive !== false) R.active = R.list.length - 1;
+      repaint(kind);
+      return {
+        ok:true, kind:kind, index:R.list.length-1, name:entry.name, id:entry.id||null,
+        applied:rep.applied, ignored:rep.ignored, managed:rep.managed
+      };
+    },
+
+    update_entry: function(cmd){
+      var kind = cmd.kind;
+      var R = A.roster(kind);
+      if(!R) return { ok:false, error:"Unknown kind: "+kind };
+      var i = locate(kind, cmd);
+      if(i < 0) return { ok:false, error:"No matching entry in "+kind };
+      var entry = R.list[i];
+      var applied = [], ignored = [], managed = [];
+      if(typeof cmd.newName === "string"){ entry.name = cmd.newName; applied.push("name"); }
+
+      var rep = classify(kind, { fields: cmd.fields || {}, lists: cmd.lists || {} }, entry);
+      applied = applied.concat(rep.applied);
+      managed = rep.managed.slice();
+      ignored = rep.ignored.slice();
+
+      // Only keys the template defines are written. Anything else is dropped
+      // and reported, so a stale or bogus key can neither be created here nor
+      // survive as a false "applied" on later calls.
+      rep.applied.forEach(function(full){
+        if(full.indexOf("fields.") === 0){
+          var k = full.slice(7);
+          entry.fields[k] = cmd.fields[k];
+        }else{
+          var lk = full.slice(6);
+          if(Array.isArray(cmd.lists[lk])) entry.lists[lk] = cmd.lists[lk].slice();
+        }
+      });
+      // A non-array list value is a caller mistake worth naming precisely.
+      Object.keys(cmd.lists || {}).forEach(function(k){
+        if(Array.isArray(cmd.lists[k])) return;
+        var at = ignored.indexOf("lists."+k);
+        if(at >= 0) ignored[at] = "lists."+k+" (not an array)";
+        else ignored.push("lists."+k+" (not an array)");
+      });
+      repaint(kind);
+      return { ok:true, kind:kind, index:i, name:entry.name, applied:applied, ignored:ignored, managed:managed };
+    },
+
+    delete_entry: function(cmd){
+      var kind = cmd.kind;
+      var R = A.roster(kind);
+      if(!R) return { ok:false, error:"Unknown kind: "+kind };
+      var i = locate(kind, cmd);
+      if(i < 0) return { ok:false, error:"No matching entry in "+kind };
+      var removed = R.list.splice(i,1)[0];
+      if(R.active >= R.list.length) R.active = Math.max(0, R.list.length-1);
+      repaint(kind);
+      return { ok:true, kind:kind, removed:(removed && removed.name) || "" };
+    },
+
+    set_lorebook_name: function(cmd){
+      var id = LORE_INPUT[cmd.kind];
+      var el = id ? document.getElementById(id) : null;
+      if(!el) return { ok:false, error:"No lorebook name field for "+cmd.kind };
+      el.value = String(cmd.name || "");
+      try{ A.autosave(); }catch(_){}
+      return { ok:true, kind:cmd.kind, name:el.value };
+    },
+
+    set_relationship: function(cmd){
+      var from = String(cmd.from||"").trim();
+      var to = String(cmd.to||"").trim();
+      if(!from || !to) return { ok:false, error:"Both from and to are required" };
+      A.relationships().push({
+        id: A.wwId("rel"), from:from, to:to,
+        label: typeof cmd.label === "string" ? cmd.label : "",
+        reciprocal: cmd.reciprocal !== false
+      });
+      try{ A.autosave(); }catch(_){}
+      try{ A.renderRelationshipUI(); }catch(_){}
+      return { ok:true, from:from, to:to };
+    },
+
+    render_entry_markdown: function(cmd){
+      var kind = cmd.kind;
+      var R = A.roster(kind);
+      if(!R) return { ok:false, error:"Unknown kind: "+kind };
+      var i = locate(kind, cmd);
+      if(i < 0) return { ok:false, error:"No matching entry in "+kind };
+      var hide = (typeof cmd.hideEmpty === "boolean")
+        ? cmd.hideEmpty : (document.getElementById("hideEmpty") ? document.getElementById("hideEmpty").checked : true);
+      var md = A.cardMd(R.list[i], kind, hide);
+      return { ok:true, kind:kind, index:i, markdown:md, approxTokens: A.estTokens(md) };
+    },
+
+    build_lorebook: function(cmd){
+      var hide = (typeof cmd.hideEmpty === "boolean")
+        ? cmd.hideEmpty : (document.getElementById("hideEmpty") ? document.getElementById("hideEmpty").checked : true);
+      var kind = cmd.kind;
+      var entries = {};
+      var bookName;
+      if(kind === "everything"){
+        var rows = A.masterCollect(hide);
+        rows.forEach(function(r,i){
+          var e = A.lorebookEntry(i, r.st, hide, r.kind);
+          e.comment = "[" + r.label + "] " + e.comment;
+          entries[String(i)] = e;
+        });
+        bookName = (document.getElementById("masterName") ? document.getElementById("masterName").value.trim() : "") || "Everything";
+      } else {
+        var R = A.roster(kind);
+        if(!R) return { ok:false, error:"Unknown kind: "+kind };
+        if(kind === "scenario"){
+          var st = A.roster("scenario").list[A.roster("scenario").active];
+          entries["0"] = A.lorebookEntry(0, st, hide, "scenario");
+          bookName = (st.name||"").trim() || "Scenario";
+        } else {
+          R.list.forEach(function(st, i){ entries[String(i)] = A.lorebookEntry(i, st, hide, kind); });
+          bookName = loreName(kind) || kind;
+        }
+      }
+      return { ok:true, kind:kind, lorebook:{ name:bookName, entries:entries }, entryCount:Object.keys(entries).length };
+    }
+  };
+
+  // --- transport --------------------------------------------------------
+  function post(path, obj){
+    return fetch(BRIDGE_URL + path, {
+      method:"POST",
+      headers:{ "Content-Type":"application/json" },
+      body: JSON.stringify(obj)
+    });
+  }
+
+  function currentProjectName(){
+    var sel = document.getElementById("projectSelect");
+    if(sel && sel.options.length && sel.selectedIndex >= 0) return sel.options[sel.selectedIndex].text;
+    return null;
+  }
+
+  function pushState(){
+    var snap = A.snapshot();
+    snap.projectName = currentProjectName();
+    return post("/state", snap).catch(function(){});
+  }
+
+  // Commands arrive as { cmdId, type, args }. Handlers receive the args object,
+  // so a tool argument named "id" can never collide with the command envelope.
+  function runCommand(cmd){
+    var fn = handlers[cmd.type];
+    var args = (cmd && cmd.args) || {};
+    if(!fn) return { ok:false, error:"Unknown command: "+(cmd && cmd.type) };
+    try{ return fn(args); }
+    catch(e){ return { ok:false, error: (e && e.message) ? e.message : String(e) }; }
+  }
+
+  function tick(){
+    fetch(BRIDGE_URL + "/commands")
+      .then(function(r){ if(!r.ok) throw new Error("bad status"); return r.json(); })
+      .then(function(data){
+        var cmds = (data && data.commands) || [];
+        var chained = Promise.resolve();
+        cmds.forEach(function(cmd){
+          chained = chained.then(function(){
+            var result = runCommand(cmd);
+            return post("/result", { id:cmd.cmdId, result:result }).catch(function(){});
+          });
+        });
+        // Mirror the (possibly just-changed) state back after every poll so the
+        // server's copy stays live even when the user edits in the UI directly.
+        return chained.then(function(){ return pushState(); });
+      })
+      .then(
+        function(){
+          // Announce on the first successful poll (wasConnected is null then),
+          // and on any reconnect after a drop.
+          if(wasConnected !== true) A.toast("AI bridge connected");
+          wasConnected = true;
+          failCount = 0;
+          setStatus("on");
+          schedule(POLL_MS);
+        },
+        function(){
+          if(wasConnected === true) A.toast("AI bridge disconnected");
+          wasConnected = false;
+          failCount++;
+          setStatus(failCount >= 3 ? "off" : "idle");
+          // Back off hard once we're confident no server is present, but keep
+          // a slow heartbeat so it reconnects if the user starts the plugin later.
+          schedule(failCount >= 3 ? FAIL_MS : IDLE_MS);
+        }
+      );
+  }
+
+  function schedule(ms){
+    if(pollTimer) clearTimeout(pollTimer);
+    pollTimer = setTimeout(tick, ms || POLL_MS);
+  }
+
+  function start(){
+    pushState();
+    schedule(POLL_MS);
+    // Re-sync whenever the user switches back to this tab.
+    document.addEventListener("visibilitychange", function(){
+      if(!document.hidden) pushState();
+    });
+  }
+
+  if(document.readyState === "complete" || document.readyState === "interactive") start();
+  else document.addEventListener("DOMContentLoaded", start);
+
+  window.wwMcpBridge = { pushState:pushState, runCommand:runCommand, url:BRIDGE_URL };
+})();
+</script>
 
 </body>
 </html>
